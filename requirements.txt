@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+fsspec
+requests
+aiohttp
+tifffile
+imagecodecs
+Pillow
+gcsfs
+pydantic
