@@ -1,6 +1,4 @@
-# WSI Thumbnail Generator for GCP
-
-A fast, fully Python-based Whole Slide Image (WSI) thumbnail generator that is natively optimized for cloud deployments such as Google Cloud Run or Google Kubernetes Engine. 
+# WSI Thumbnail Generator
 
 This service reads Multi-Page TIFF and Aperio `.svs` files hosted dynamically on Google Cloud Storage (GCS) using HTTP Range Requests. Rather than downloading gigabytes of imaging data, it smartly parses the TIFF metadata to stream just the required subset of bytes corresponding to the thumbnail page.
 
@@ -30,7 +28,7 @@ This service reads Multi-Page TIFF and Aperio `.svs` files hosted dynamically on
    http://localhost:8080/thumbnail?url=YOUR_SVS_PUBLIC_OR_SIGNED_URL
    ```
 
-## Deploying on Google Cloud Run (GCP)
+## Deploying on Google Cloud Run (GCP), eg.
 
 This API is stateless, containerized, and perfectly suited for **Google Cloud Run**.
 
