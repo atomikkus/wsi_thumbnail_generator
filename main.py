@@ -1,7 +1,10 @@
-from fastapi import FastAPI, HTTPException, Query
+import secrets
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Literal
 import fsspec
 import tifffile
 import io
@@ -27,6 +30,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Basic Auth: credentials from env (API_USERNAME, API_PASSWORD). If unset, auth is disabled.
+_security = HTTPBasic(auto_error=False)
+
+def verify_basic_auth(credentials: HTTPBasicCredentials | None = Depends(_security)):
+    username = os.environ.get("API_USERNAME", "").strip()
+    password = os.environ.get("API_PASSWORD", "").strip()
+    if not username or not password:
+        return None  # auth disabled when env not set
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Missing credentials", headers={"WWW-Authenticate": "Basic"})
+    if not (
+        secrets.compare_digest(credentials.username.encode("utf-8"), username.encode("utf-8"))
+        and secrets.compare_digest(credentials.password.encode("utf-8"), password.encode("utf-8"))
+    ):
+        raise HTTPException(status_code=401, detail="Invalid username or password", headers={"WWW-Authenticate": "Basic"})
+    return credentials.username
+
 class ThumbnailRequest(BaseModel):
     id: str
     created_on: str
@@ -40,18 +60,20 @@ class ThumbnailResponse(BaseModel):
     thumbnail_image_link: str
     patient_id: str
     slide_id: str
-    metadata: dict
     block_id: str
+    status: Literal["PENDING", "FINISHED", "FAILED"]
+    metadata: dict  # width, height, mpp, objective_power, vendor (all string values)
 
 @app.get("/health")
 def health_check():
     """Simple health check endpoint for Cloud Run."""
     return {"status": "ok"}
 
-import re
-
 @app.get("/metadata")
-def get_metadata(url: str = Query(..., description="Public or Signed HTTP/HTTPS URL of the WSI file (.svs, .tif)")):
+def get_metadata(
+    url: str = Query(..., description="Public or Signed HTTP/HTTPS URL of the WSI file (.svs, .tif)"),
+    _: str | None = Depends(verify_basic_auth),
+):
     """
     Extracts physical dimensions and Microns Per Pixel (MPP) from the WSI file. 
     Crucial for Viewer tools like measurement (ruler) annotations.
@@ -123,7 +145,8 @@ def get_metadata(url: str = Query(..., description="Public or Signed HTTP/HTTPS 
 @app.get("/thumbnail", response_class=Response)
 def get_thumbnail(
     url: str = Query(..., description="Public or Signed HTTP/HTTPS URL of the WSI file (.svs, .tif)"),
-    max_size: int = Query(512, description="Maximum width/height of the generated thumbnail")
+    max_size: int = Query(512, description="Maximum width/height of the generated thumbnail"),
+    _: str | None = Depends(verify_basic_auth),
 ):
     """
     Given a remote HTTP URL for a Whole Slide Image, intelligently extract the thumbnail
@@ -183,7 +206,7 @@ def get_thumbnail(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/process", response_model=ThumbnailResponse)
-def process_wsi(request: ThumbnailRequest):
+def process_wsi(request: ThumbnailRequest, _: str | None = Depends(verify_basic_auth)):
     """
     POST endpoint to process WSI: extracts metadata, generates a PNG thumbnail,
     saves it back to GCS, and returns the requested JSON payload.
@@ -279,13 +302,22 @@ def process_wsi(request: ThumbnailRequest):
         with fsspec.open(thumbnail_bucket_link, "wb", token="google_default") as out_f:
             out_f.write(img_bytes)
             
+        # Normalize metadata to string values for response
+        response_metadata = {
+            "width": str(metadata["width"]) if metadata["width"] is not None else "",
+            "height": str(metadata["height"]) if metadata["height"] is not None else "",
+            "mpp": str(metadata["mpp"]) if metadata["mpp"] is not None else "",
+            "objective_power": str(metadata["objective_power"]) if metadata["objective_power"] is not None else "",
+            "vendor": str(metadata["vendor"]) if metadata["vendor"] else "unknown",
+        }
         return ThumbnailResponse(
             id=request.id,
             thumbnail_image_link=thumbnail_bucket_link,
             patient_id=request.patient_id,
             slide_id=request.slide_id,
-            metadata=metadata,
-            block_id=request.block_id
+            block_id=request.block_id,
+            status="FINISHED",
+            metadata=response_metadata,
         )
 
     except Exception as e:
