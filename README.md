@@ -1,6 +1,4 @@
-# WSI Thumbnail Generator for GCP
-
-A fast, fully Python-based Whole Slide Image (WSI) thumbnail generator that is natively optimized for cloud deployments such as Google Cloud Run or Google Kubernetes Engine. 
+# WSI Thumbnail Generator
 
 This service reads Multi-Page TIFF and Aperio `.svs` files hosted dynamically on Google Cloud Storage (GCS) using HTTP Range Requests. Rather than downloading gigabytes of imaging data, it smartly parses the TIFF metadata to stream just the required subset of bytes corresponding to the thumbnail page.
 
@@ -30,7 +28,7 @@ This service reads Multi-Page TIFF and Aperio `.svs` files hosted dynamically on
    http://localhost:8080/thumbnail?url=YOUR_SVS_PUBLIC_OR_SIGNED_URL
    ```
 
-## Deploying on Google Cloud Run (GCP)
+## Deploying on Google Cloud Run (GCP), eg.
 
 This API is stateless, containerized, and perfectly suited for **Google Cloud Run**.
 
@@ -51,6 +49,20 @@ This API is stateless, containerized, and perfectly suited for **Google Cloud Ru
    ```
 
 *(If you are deploying securely, omit `--allow-unauthenticated` and configure IAM permissions for service-to-service communication).*
+
+## API Authentication (Basic Auth)
+
+The API supports optional **HTTP Basic Auth** to protect `/metadata`, `/thumbnail`, and `/process`. The `/health` endpoint is always unauthenticated for load balancers and health checks.
+
+- **Enable auth:** Set environment variables **`API_USERNAME`** and **`API_PASSWORD`**. If either is missing or empty, auth is disabled and the endpoints remain open.
+- **Cloud Run:** In the Cloud Run console, go to your service → **Edit & deploy new revision** → **Variables & secrets** and add `API_USERNAME` and `API_PASSWORD` (or use Secret Manager for the password).
+- **Local:** Export before starting the server, e.g. `export API_USERNAME=myuser API_PASSWORD=mysecret` (or set in your shell/config).
+
+**Calling the API with auth (e.g. curl):**
+```bash
+curl -u "USERNAME:PASSWORD" "https://YOUR_SERVICE_URL/metadata?url=YOUR_WSI_URL"
+curl -u "USERNAME:PASSWORD" "https://YOUR_SERVICE_URL/thumbnail?url=YOUR_WSI_URL"
+```
 
 ## Architectural Note
 `tifffile` and `fsspec` together give us the ability to seek through HTTP files just like a local mounted file system. `imagecodecs` ensures we can rapidly decompress standard WSI codecs like JPEG 2000.
