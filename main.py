@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,17 +7,107 @@ import fsspec
 import tifffile
 import io
 import os
-from PIL import Image
+import json
 import logging
 import re
+import threading
+import requests
+from PIL import Image
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Kafka consumer control
+_kafka_stop_event = threading.Event()
+_kafka_thread = None
+
+MAX_RETRIES = 3
+
+
+def _run_kafka_consumer_loop():
+    """Background loop: consume from thumbnail-image-upload-stream, call /process with basic auth, publish to processed-thumbnail-image-stream. Manual commit only; commit after successful publish. Retry up to 3 times then commit and move on."""
+    try:
+        from kafka_factory import create_consumer, create_producer
+    except FileNotFoundError as e:
+        logger.info("Kafka config not found, consumer disabled: %s", e)
+        return
+    except Exception as e:
+        logger.warning("Kafka consumer not started: %s", e)
+        return
+    api_base = os.environ.get("API_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+    api_user = os.environ.get("API_USERNAME", "")
+    api_pass = os.environ.get("API_PASSWORD", "")
+    process_url = f"{api_base}/process"
+    consumer = None
+    producer = None
+    out_topic = None
+    try:
+        consumer = create_consumer()
+        producer, out_topic = create_producer()
+    except Exception as e:
+        logger.error("Failed to create Kafka client: %s", e)
+        return
+    logger.info("Kafka consumer loop started")
+    while not _kafka_stop_event.is_set():
+        msg = consumer.poll(timeout=1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            logger.warning("Consumer error: %s", msg.error())
+            continue
+        try:
+            payload = json.loads(msg.value().decode("utf-8"))
+        except Exception as e:
+            logger.warning("Invalid message JSON: %s", e)
+            consumer.commit(message=msg)
+            continue
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = requests.post(
+                    process_url,
+                    json=payload,
+                    auth=(api_user, api_pass),
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                producer.produce(out_topic, value=json.dumps(result).encode("utf-8"))
+                producer.flush(timeout=10)
+                consumer.commit(message=msg)
+                logger.info("Processed and published message id=%s", payload.get("id"))
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("Attempt %s/%s failed for id=%s: %s", attempt + 1, MAX_RETRIES, payload.get("id"), e)
+        else:
+            logger.error("All %s attempts failed for id=%s, committing and moving on: %s", MAX_RETRIES, payload.get("id"), last_error)
+            consumer.commit(message=msg)
+    logger.info("Kafka consumer loop stopped")
+    try:
+        consumer.close()
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start Kafka consumer in a background thread on startup; signal stop on shutdown."""
+    global _kafka_thread
+    _kafka_stop_event.clear()
+    _kafka_thread = threading.Thread(target=_run_kafka_consumer_loop, daemon=True)
+    _kafka_thread.start()
+    yield
+    _kafka_stop_event.set()
+    if _kafka_thread is not None:
+        _kafka_thread.join(timeout=10)
+
+
 app = FastAPI(
-    title="WSI Thumbnail Generator", 
-    description="Fast, minimal Thumbnail Generator for WSI (.svs) using HTTP Range Requests. Supports GCS public and signed URLs."
+    title="WSI Thumbnail Generator",
+    description="Fast, minimal Thumbnail Generator for WSI (.svs) using HTTP Range Requests. Supports GCS public and signed URLs.",
+    lifespan=lifespan,
 )
 
 # Enable CORS (useful if calling from a frontend like React/OpenSeadragon)
@@ -48,7 +139,6 @@ def health_check():
     """Simple health check endpoint for Cloud Run."""
     return {"status": "ok"}
 
-import re
 
 @app.get("/metadata")
 def get_metadata(url: str = Query(..., description="Public or Signed HTTP/HTTPS URL of the WSI file (.svs, .tif)")):
@@ -265,12 +355,15 @@ def process_wsi(request: ThumbnailRequest):
         
         # Override destination bucket and path if THUMBNAIL_OUTPUT_BUCKET is provided as an env var!
         # Example output bucket name: my-thumbnails-bucket
+        # Optional THUMBNAIL_OUTPUT_PREFIX = folder path inside the bucket (e.g. "thumbnails/" or "slides/2025/")
         output_bucket = os.environ.get("THUMBNAIL_OUTPUT_BUCKET", "")
+        output_prefix = (os.environ.get("THUMBNAIL_OUTPUT_PREFIX") or "").strip().rstrip("/")
+        if output_prefix:
+            output_prefix = f"{output_prefix}/"
         if output_bucket:
-            # Reconstruct the GS path to write the file strictly to the specified bucket
-            # while maintaining the original filename
+            # Reconstruct the GS path to write the file to the specified bucket (and optional folder)
             filename = os.path.basename(thumbnail_bucket_link)
-            thumbnail_bucket_link = f"gs://{output_bucket}/{filename}"
+            thumbnail_bucket_link = f"gs://{output_bucket}/{output_prefix}{filename}"
             
         logger.info(f"Saving generated thumbnail to {thumbnail_bucket_link}")
         

@@ -8,3 +8,6 @@ imagecodecs
 Pillow
 gcsfs
 pydantic
+confluent-kafka
+PyYAML
+google-auth

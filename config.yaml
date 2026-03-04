@@ -1,0 +1,9 @@
+# Kafka broker config. Switch broker_type to change behavior (e.g. gcp_managed vs plain).
+kafka:
+  broker_type: gcp_managed
+  bootstrap_servers: "bootstrap.fbc-kafka-dev-asst1.asia-south1.managedkafka.in-development-project.cloud.goog:9092"
+  consumer:
+    topic: thumbnail-image-upload-stream
+    group_id: wsi-thumbnail-consumer-group
+  producer:
+    topic: processed-thumbnail-image-stream
